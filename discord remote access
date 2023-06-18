@@ -1,0 +1,173 @@
+import os
+import asyncio
+import discord
+from discord.ext import commands
+from PIL import ImageGrab
+import tempfile
+import time
+import psutil
+import ctypes
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+intents = discord.Intents.default()
+intents.typing = False
+intents.presences = False
+intents.messages = True
+intents.message_content = True
+intents.voice_states = True
+intents.guilds = True
+bot = commands.Bot(command_prefix='.', intents=intents, help_command=None)
+
+def take_screenshot():
+    screenshot = ImageGrab.grab()
+    return screenshot
+
+async def send_screenshot(ctx):
+    screenshot = take_screenshot()
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+        screenshot.save(temp_file, 'PNG')
+        temp_file.close()
+        with open(temp_file.name, 'rb') as image_file:
+            image_data = discord.File(image_file, filename='screenshot.png')
+            await ctx.send(file=image_data)
+        os.unlink(temp_file.name)
+
+@bot.event
+async def on_ready():
+    print(f'{bot.user} has connected to Discord!')
+
+@bot.command(name='screenshot')
+async def screenshot_command(ctx):
+    await ctx.send("Here you go")
+    await send_screenshot(ctx)
+
+@bot.command(name='ping')
+async def ping(ctx):
+    start_time = time.time()
+    message = await ctx.send("Pong!")
+    end_time = time.time()
+    latency = int((end_time - start_time) * 1000)
+    await message.edit(content=f"Pong! `{latency}ms`")
+
+@bot.command(name='join')
+async def join_channel(ctx):
+    if ctx.author.voice is None:
+        await ctx.send("You must be connected to a voice channel.")
+        return
+
+    channel = ctx.author.voice.channel
+    await channel.connect()
+
+@bot.command(name='leave')
+async def leave_channel(ctx):
+    if ctx.voice_client is None:
+        await ctx.send("I'm not connected to a voice channel.")
+        return
+
+    await ctx.voice_client.disconnect()
+
+@bot.command(name='help')
+async def help_command(ctx):
+    embed = discord.Embed(title="Bot Commands", description="List of available commands", color=discord.Color.blue())
+
+    embed.add_field(name=".screenshot", value="Takes a screenshot and sends it in the chat.", inline=False)
+    embed.add_field(name=".ping", value="Measures the bot's latency in milliseconds.", inline=False)
+    embed.add_field(name=".join", value="Joins the voice channel you're currently in.", inline=False)
+    embed.add_field(name=".leave", value="Leaves the voice channel the bot is in.", inline=False)
+    embed.add_field(name=".apps", value="Lists the running applications with their respective numbers.", inline=False)
+    embed.add_field(name=".close <app_number>", value="Closes the application specified by <app_number> from the .apps command.", inline=False)
+
+    await ctx.send(embed=embed)
+
+def visible_processes():
+    # Filter out background processes and limit to user-visible applications
+    return [(p.pid, p.info) for p in psutil.process_iter(['name', 'exe']) if p.info['exe'] is not None and has_visible_windows(p.pid)]
+
+def has_visible_windows(process_id):
+    EnumWindows = ctypes.windll.user32.EnumWindows
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+    GetWindowText = ctypes.windll.user32.GetWindowTextW
+    GetWindowTextLength = ctypes.windll.user32.GetWindowTextLengthW
+    IsWindowVisible = ctypes.windll.user32.IsWindowVisible
+
+    titles = []
+
+    def foreach_window(hwnd, lParam):
+        if IsWindowVisible(hwnd):
+            length = GetWindowTextLength(hwnd)
+            buff = ctypes.create_unicode_buffer(length + 1)
+            GetWindowText(hwnd, buff, length + 1)
+            titles.append(buff.value)
+        return True
+
+    EnumWindows(EnumWindowsProc(foreach_window), 0)
+
+    return any(title != '' for title in titles)
+
+def create_apps_embed(processes, page_number, items_per_page):
+    start_index = (page_number - 1) * items_per_page
+    end_index = start_index + items_per_page
+
+    apps_list = "```\n" + "\n".join([f"{start_index + i + 1:3}. {process[1]['name']} (PID: {process[0]})" for i, process in enumerate(processes[start_index:end_index])]) + "```"
+
+    embed = discord.Embed(title="Running Applications", description=apps_list, color=discord.Color.blue())
+    embed.set_footer(text=f"Page {page_number} | Use .apps <page_number> to view other pages.")
+
+    return embed
+
+@bot.command(name='closesearch')
+async def closesearch_command(ctx, keyword: str):
+    processes = visible_processes()
+    keyword = keyword.lower()
+    matches = [(i + 1, process) for i, process in enumerate(processes) if keyword in process[1]['name'].lower()]
+
+    if matches:
+        for match in matches:
+            process_to_close = psutil.Process(match[1][0])
+            process_to_close.terminate()
+            await ctx.send(f"Closed **{process_to_close.name()}** (PID: {process_to_close.pid}).")
+    else:
+        await ctx.send(f"No applications found matching '{keyword}'.")
+        
+@bot.command(name='apps')
+async def apps_command(ctx, page_number: int = 1):
+    processes = visible_processes()
+    items_per_page = 10
+    max_page_number = (len(processes) + items_per_page - 1) // items_per_page
+
+    if page_number < 1 or page_number > max_page_number:
+        await ctx.send(f"Invalid page number. Please enter a number between 1 and {max_page_number}.")
+        return
+
+    embed = create_apps_embed(processes, page_number, items_per_page)
+    await ctx.send(embed=embed)
+
+@bot.command(name='appsearch')
+async def appsearch_command(ctx, keyword: str):
+    processes = visible_processes()
+    keyword = keyword.lower()
+    matches = [(i + 1, process) for i, process in enumerate(processes) if keyword in process[1]['name'].lower()]
+
+    if matches:
+        match_list = "\n".join([f"{match[0]:3}. {match[1][1]['name']} (PID: {match[1][0]})" for match in matches])
+        await ctx.send(f"Application(s) found matching '{keyword}':\n```\n{match_list}\n```")
+    else:
+        await ctx.send(f"No applications found matching '{keyword}'.")
+
+@bot.command(name='close')
+async def close_command(ctx, app_number: int):
+    processes = visible_processes()
+
+    if app_number < 1 or app_number > len(processes):
+        await ctx.send(f"Invalid app number. Please enter a number between 1 and {len(processes)}.")
+        return
+
+    process_to_close = psutil.Process(processes[app_number - 1][0])
+    process_to_close.terminate()
+
+    await ctx.send(f"Closed **{process_to_close.name()}** (PID: {process_to_close.pid}).")
+
+bot.run(TOKEN)
